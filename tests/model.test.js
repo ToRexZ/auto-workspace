@@ -246,3 +246,31 @@ test("targetLabel falls back to the stored key for a monitor that is not connect
   const a = Model.normalizeAssignment(assignment({ workspace: 2, monitor: "Some Absent Screen" }))
   assert.equal(Model.targetLabel(a, MONITOR_LIST), "Some Absent Screen · WS2")
 })
+
+// ---------------------------------------------------------------------------
+// typeForExec: the results-list toggle adds an assignment from a .desktop Exec
+// alone, with no type picker to consult. Hardcoding "app" mislabels every web
+// app, which changes its relaunch default (App relaunches, Web App does not).
+// ---------------------------------------------------------------------------
+
+test("typeForExec recognises an omarchy web app", () => {
+  assert.equal(Model.typeForExec("omarchy-launch-webapp https://outlook.office.com/mail/"), "webapp")
+  assert.equal(Model.typeForExec('omarchy-launch-webapp "https://claude.ai/new"'), "webapp")
+})
+
+test("typeForExec treats a native command as an app", () => {
+  assert.equal(Model.typeForExec("/opt/Lichtblick/lichtblick"), "app")
+  assert.equal(Model.typeForExec("nvim"), "app")
+  assert.equal(Model.typeForExec("/usr/bin/google-chrome-stable"), "app")
+})
+
+test("typeForExec treats a terminal launcher as an app", () => {
+  // Herdr is a TUI wrapped by omarchy-launch-terminal -- still an app window,
+  // not a web app, and it should relaunch like one.
+  assert.equal(Model.typeForExec("omarchy-launch-terminal herdr"), "app")
+})
+
+test("typeForExec falls back to app for empty input", () => {
+  assert.equal(Model.typeForExec(""), "app")
+  assert.equal(Model.typeForExec(null), "app")
+})

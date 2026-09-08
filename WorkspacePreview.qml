@@ -16,6 +16,10 @@ import qs.Ui
 Item {
     id: root
     property int workspace: 1
+    // What the header shows. The target is not always a numbered slot -- it can
+    // be a particular screen's slot or a special workspace -- so the caller
+    // passes the label rather than this deriving "WS <n>" from the number.
+    property string targetLabel: ""
     property var assignedApps: [] // assignments filtered for this WS
     property var appList: [] // installed apps with iconPath, for icon lookup
     property bool isExpanded: false
@@ -221,7 +225,7 @@ Item {
             spacing: 6
             Text {
                 textFormat: Text.PlainText
-                text: "WS " + root.workspace
+                text: root.targetLabel !== "" ? root.targetLabel : ("WS " + root.workspace)
                 color: Color.foreground
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption

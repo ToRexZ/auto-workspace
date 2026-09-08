@@ -184,19 +184,40 @@ Panel {
         for (var i=0;i<list.length;i++) if (list[i].exec===exec || list[i].command===exec) return true
         return false
     }
+    // Add or remove one app on the target currently selected above.
+    //
+    // Matched and created against the whole target, not the slot number alone:
+    // the same number on another screen is a different workspace, and a special
+    // workspace is neither. Comparing only `workspace` matched an assignment on
+    // a different screen, and creating with only `workspace` wrote to the global
+    // workspace whatever the Screen and Scratchpad pickers said -- which then
+    // left the toggle reading "off", because the row's checked state comes from
+    // the assignments on the selected target.
     function toggleInWorkspace(exec, name) {
-        var ws=root.formWorkspace
+        var key = root.formTargetKey
+        var label = root.formTargetLabel
         for (var i=0;i<root.assignments.length;i++) {
             var a=root.assignments[i]
-            if (a.workspace===ws && (a.exec===exec || a.command===exec)) {
+            if (Model.targetKey(a)===key && (a.exec===exec || a.command===exec)) {
                 root.removeAssignment(a.id)
-                root.statusText="Removed "+a.name+" from WS"+ws; clearStatusTimer.restart()
+                root.statusText="Removed "+a.name+" from "+label; clearStatusTimer.restart()
                 return
             }
         }
-        var item=Model.normalizeAssignment({workspace:ws, name:name, command:exec, exec:exec, type:"app", enabled:true, onlyOnBoot:true})
+        var item=Model.normalizeAssignment({
+            workspace:root.formWorkspace,
+            monitor:root.formTarget.monitor,
+            special:root.formTarget.special,
+            name:name, command:exec, exec:exec,
+            // Derived from the command: there is no type picker on this path, and
+            // the type decides whether the app relaunches after being closed.
+            type:Model.typeForExec(exec),
+            enabled:true, onlyOnBoot:true
+        })
         root.assignments=root.assignments.concat([item]); root.config.assignments=root.assignments.slice()
-        root.saveConfig(); root.statusText="Added "+item.name+" → WS"+item.workspace; clearStatusTimer.restart()
+        root.saveConfig()
+        root.statusText="Added "+item.name+" → "+Model.targetLabel(item, root.liveMonitors)
+        clearStatusTimer.restart()
         if (root.bar && typeof root.bar.broadcast === "function") root.bar.broadcast("refreshCounts")
         root.countsChanged()
     }
@@ -870,6 +891,7 @@ Panel {
                             Layout.minimumHeight: Math.min(Style.space(200), Math.round(panel.screenH * 0.3))
                             bar: root.bar
                             workspace: root.formWorkspace
+                            targetLabel: root.formTargetLabel
                             assignedApps: root.addedApps
                             appList: root.appList
                             screenW: panel.screenW

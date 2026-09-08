@@ -152,6 +152,22 @@ function resolveTarget(a, liveMonitorKeys) {
     return { selector: String(a.workspace), name: String(a.workspace) }
 }
 
+// The assignment type implied by a command.
+//
+// The results-list toggle builds an assignment from a .desktop Exec with no
+// type picker to consult, and the type is not cosmetic: it sets the relaunch
+// default, where "app" comes back after you close its window and "webapp" does
+// not (Chromium reuses its process, so relaunching makes duplicates).
+//
+// omarchy-launch-terminal wraps a TUI in a real terminal window, so it is an
+// app despite the omarchy-launch prefix.
+function typeForExec(exec) {
+    var s = String(exec == null ? "" : exec).trim()
+    if (s.length === 0) return "app"
+    if (s.indexOf("omarchy-launch-webapp") === 0) return "webapp"
+    return "app"
+}
+
 // How a target reads in the panel.
 //
 // A monitor is stored by its description key, which is long and unfamiliar
