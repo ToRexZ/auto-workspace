@@ -274,3 +274,60 @@ test("typeForExec falls back to app for empty input", () => {
   assert.equal(Model.typeForExec(""), "app")
   assert.equal(Model.typeForExec(null), "app")
 })
+
+// ---------------------------------------------------------------------------
+// applyTarget: move an existing assignment to a different target in place,
+// from the Assignments list, without rebuilding it from scratch.
+// ---------------------------------------------------------------------------
+
+test("applyTarget moves an assignment to a monitor slot", () => {
+  const a = Model.normalizeAssignment(assignment({ workspace: 1, name: "Jira", command: "x" }))
+  const moved = Model.applyTarget(a, { monitor: "EDO EF10QBC64.C", special: null, workspace: 7 })
+  assert.equal(moved.monitor, "EDO EF10QBC64.C")
+  assert.equal(moved.workspace, 7)
+  assert.equal(moved.special, null)
+})
+
+test("applyTarget moves an assignment into a special workspace", () => {
+  const a = Model.normalizeAssignment(assignment({ workspace: 3, monitor: "EDO EF10QBC64.C" }))
+  const moved = Model.applyTarget(a, { monitor: null, special: "email", workspace: 3 })
+  assert.equal(moved.special, "email")
+  // A special is not a slot on a screen, so the monitor must be cleared or the
+  // two would disagree about where it goes.
+  assert.equal(moved.monitor, null)
+})
+
+test("applyTarget moves an assignment back to a global workspace", () => {
+  const a = Model.normalizeAssignment(assignment({ workspace: 2, monitor: "EDO EF10QBC64.C" }))
+  const moved = Model.applyTarget(a, { monitor: null, special: null, workspace: 5 })
+  assert.equal(moved.monitor, null)
+  assert.equal(moved.special, null)
+  assert.equal(moved.workspace, 5)
+})
+
+test("applyTarget preserves everything that is not the target", () => {
+  const a = Model.normalizeAssignment(assignment({
+    workspace: 1, name: "Jira", command: "u", exec: "omarchy-launch-webapp u",
+    type: "webapp", enabled: false, onlyOnBoot: false
+  }))
+  const moved = Model.applyTarget(a, { monitor: null, special: "scratchpad", workspace: 1 })
+  assert.equal(moved.id, a.id)
+  assert.equal(moved.name, a.name)
+  assert.equal(moved.exec, a.exec)
+  assert.equal(moved.type, "webapp")
+  assert.equal(moved.enabled, false)
+  assert.equal(moved.onlyOnBoot, false)
+})
+
+test("applyTarget does not mutate the original", () => {
+  const a = Model.normalizeAssignment(assignment({ workspace: 1 }))
+  Model.applyTarget(a, { monitor: "EDO EF10QBC64.C", special: null, workspace: 9 })
+  assert.equal(a.monitor, null)
+  assert.equal(a.workspace, 1)
+})
+
+test("applyTarget changes the target key, so grouping follows the move", () => {
+  const a = Model.normalizeAssignment(assignment({ workspace: 1 }))
+  const moved = Model.applyTarget(a, { monitor: "EDO EF10QBC64.C", special: null, workspace: 1 })
+  assert.notEqual(Model.targetKey(a), Model.targetKey(moved))
+})

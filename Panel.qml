@@ -199,6 +199,43 @@ Panel {
         root.countsChanged()
     }
 
+    // Move one assignment to a different screen, workspace or scratchpad from
+    // its own row, rather than via the pickers plus a re-toggle.
+    //
+    // Refuses a move that would land the same command on a target that already
+    // has it: two identical assignments on one workspace launch the app twice.
+    function retargetAssignment(id, target) {
+        var current = null
+        for (var i = 0; i < root.assignments.length; i++)
+            if (root.assignments[i].id === id) current = root.assignments[i]
+        if (!current) return
+
+        var moved = Model.applyTarget(current, target)
+        var movedKey = Model.targetKey(moved)
+        if (movedKey === Model.targetKey(current)) return
+
+        for (var j = 0; j < root.assignments.length; j++) {
+            var other = root.assignments[j]
+            if (other.id === id) continue
+            if (Model.targetKey(other) === movedKey
+                && (other.exec === moved.exec || other.command === moved.exec)) {
+                root.statusText = moved.name + " is already on " + Model.targetLabel(moved, root.liveMonitors)
+                clearStatusTimer.restart()
+                return
+            }
+        }
+
+        var out = []
+        for (var k = 0; k < root.assignments.length; k++)
+            out.push(root.assignments[k].id === id ? moved : root.assignments[k])
+        root.assignments = out
+        root.config.assignments = out.slice()
+        root.saveConfig()
+        root.statusText = "Moved " + moved.name + " → " + Model.targetLabel(moved, root.liveMonitors)
+        clearStatusTimer.restart()
+        root.countsChanged()
+    }
+
     // Point the pickers at an assignment's target, so its row can be used to
     // navigate to the workspace it belongs to.
     function selectAssignmentTarget(a) {
@@ -1018,15 +1055,19 @@ Panel {
                                         readonly property bool isCurrent: Model.targetKey(modelData) === root.formTargetKey
 
                                         width: parent ? parent.width : 0
-                                        height: Style.space(44)
+                                        height: Style.space(52)
                                         radius: Style.space(6)
                                         // The rows on the target the pickers point at are
                                         // the ones the rest of the panel is acting on.
                                         color: isCurrent ? Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.07)
                                                          : "transparent"
 
+                                        // Behind the controls: a click on the row's
+                                        // empty space navigates, a click on a
+                                        // dropdown or button does its own thing.
                                         MouseArea {
                                             anchors.fill: parent
+                                            z: -1
                                             cursorShape: Qt.PointingHandCursor
                                             onClicked: root.selectAssignmentTarget(modelData)
                                         }
@@ -1053,12 +1094,77 @@ Panel {
                                                     textFormat: Text.PlainText
                                                     Layout.fillWidth: true
                                                     elide: Text.ElideRight
-                                                    text: Model.targetLabel(modelData, root.liveMonitors)
-                                                        + " · " + modelData.type
-                                                        + (modelData.onlyOnBoot ? "" : " · every restart")
+                                                    text: modelData.type
+                                                        + (modelData.onlyOnBoot ? " · once per boot" : " · every restart")
                                                     color: root.dim
                                                     font.family: root.fontFamily
                                                     font.pixelSize: Style.font.caption - 1
+                                                }
+                                            }
+
+                                            // Where this assignment launches. One
+                                            // control for the screen-or-scratchpad
+                                            // axis and one for the slot, mirroring
+                                            // the pickers on the left but scoped to
+                                            // this row.
+                                            Dropdown {
+                                                Layout.preferredWidth: Style.space(150)
+                                                showLabel: false
+                                                fontFamily: root.fontFamily
+                                                rowHeight: Style.space(30)
+                                                options: {
+                                                    var out = [{ value: "", label: "Any screen" }]
+                                                    for (var i = 0; i < root.liveMonitors.length; i++) {
+                                                        var m = root.liveMonitors[i]
+                                                        out.push({ value: "mon:" + m.key, label: String(m.name) })
+                                                    }
+                                                    for (var j = 0; j < root.liveSpecials.length; j++) {
+                                                        var sp = String(root.liveSpecials[j])
+                                                        out.push({ value: "special:" + sp, label: "⬒ " + sp })
+                                                    }
+                                                    // An assignment can sit on a special that no
+                                                    // longer exists -- a scratchpad is deleted when
+                                                    // its last window closes -- so keep its own
+                                                    // value selectable.
+                                                    if (modelData.special
+                                                        && root.liveSpecials.indexOf(modelData.special) === -1)
+                                                        out.push({ value: "special:" + modelData.special,
+                                                                   label: "⬒ " + modelData.special })
+                                                    return out
+                                                }
+                                                value: modelData.special ? ("special:" + modelData.special)
+                                                     : (modelData.monitor ? ("mon:" + modelData.monitor) : "")
+                                                onChanged: function(v) {
+                                                    var val = String(v)
+                                                    root.retargetAssignment(modelData.id, {
+                                                        monitor: val.indexOf("mon:") === 0 ? val.substring(4) : null,
+                                                        special: val.indexOf("special:") === 0 ? val.substring(8) : null,
+                                                        workspace: modelData.workspace
+                                                    })
+                                                }
+                                            }
+
+                                            Dropdown {
+                                                Layout.preferredWidth: Style.space(74)
+                                                showLabel: false
+                                                fontFamily: root.fontFamily
+                                                rowHeight: Style.space(30)
+                                                // A special workspace is not a numbered slot.
+                                                enabled: !modelData.special
+                                                opacity: enabled ? 1.0 : 0.35
+                                                options: {
+                                                    var out = []
+                                                    for (var i = 1; i <= 10; i++)
+                                                        out.push({ value: String(i), label: "WS" + i })
+                                                    return out
+                                                }
+                                                value: String(modelData.workspace)
+                                                onChanged: function(v) {
+                                                    root.retargetAssignment(modelData.id, {
+                                                        monitor: modelData.monitor,
+                                                        special: modelData.special,
+                                                        workspace: parseInt(String(v), 10)
+                                                    })
                                                 }
                                             }
 
@@ -1107,7 +1213,7 @@ Panel {
                             visible: root.rightView === "assignments"
                             Layout.fillWidth: true
                             wrapMode: Text.WordWrap
-                            text: "Click a row to point the pickers at its workspace · ↗ launches it now · ✕ removes it"
+                            text: "Change where an app launches with its two dropdowns · click a row to point the pickers at it · ↗ launches now · ✕ removes"
                             color: root.dim
                             font.family: root.fontFamily
                             font.pixelSize: Style.font.caption - 1

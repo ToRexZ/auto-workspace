@@ -222,6 +222,26 @@ function isValidSelector(selector) {
     return false
 }
 
+// Move an assignment to a different target, leaving everything else alone.
+//
+// Returns a new assignment rather than editing in place, so a caller can
+// rebuild its list and let the bindings notice. `target` is the same shape the
+// panel's pickers produce: { monitor, special, workspace }.
+//
+// A special workspace is not a slot on a screen, so setting one clears the
+// monitor -- otherwise the two fields would disagree about where the app goes,
+// and resolveTarget's precedence would silently pick the special.
+function applyTarget(a, target) {
+    var next = clone(a)
+    var t = target || {}
+
+    next.special = t.special ? String(t.special) : null
+    next.monitor = next.special ? null : (t.monitor ? String(t.monitor) : null)
+    if (t.workspace !== undefined && t.workspace !== null) next.workspace = t.workspace
+
+    return normalizeAssignment(next)
+}
+
 // A stable identity for "the workspace this assignment targets", for grouping
 // in the panel. Slot 2 on one screen and slot 2 on another are different
 // workspaces, so the monitor has to be part of the key.
