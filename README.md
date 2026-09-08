@@ -4,10 +4,14 @@ Auto-launch apps on workspaces at boot/login for Omarchy Quattro + Hyprland.
 
 Assign YouTube to workspace 1 so it always opens there, put Code + Terminal on workspace 2, etc. Supports multiple apps per workspace, silent launch, and per-boot dedup.
 
+> **This is a fork** of [yesheytenzin/auto-workspace](https://github.com/yesheytenzin/auto-workspace)
+> adding per-monitor and scratchpad targets — see [Targets](#targets).
+> `origin` is this fork, `upstream` is tenzin's.
+
 ## Install
 
 ```sh
-omarchy plugin add https://github.com/yesheytenzin/auto-workspace.git --enable
+omarchy plugin add https://github.com/ToRexZ/auto-workspace.git --enable
 # or manual drop-in for dev:
 mkdir -p ~/.config/omarchy/plugins/tenzin.auto-workspace
 cp -r /path/to/auto_workspace/* ~/.config/omarchy/plugins/tenzin.auto-workspace/
@@ -34,6 +38,70 @@ Tips:
 - Use filter box to pick from installed `.desktop` apps quickly.
 - Per-workspace launch is `hyprctl eval 'hl.exec_cmd("[workspace N silent] <cmd>")'` — doesn't steal focus.
 - **Launch timing is now per-app by type:** `Web App` (Chromium zygote) defaults to `Once per boot` (no duplicate on rescan), `App` (native foot/ghostty/code) defaults to `Every restart` (closed windows come back), `Custom` defaults to `Once per boot`. Change via `Once/Every` toggle per row or `Launch: Once per boot / Every restart` when adding.
+
+## Targets
+
+An assignment can go to one of three places. `workspace` is the slot number it
+always was; two optional fields say what to read it against.
+
+| Config | Launches on |
+| --- | --- |
+| `"workspace": 3` | global workspace 3 — Omarchy's default, unchanged |
+| `"workspace": 3, "monitor": "<key>"` | that screen's workspace 3 |
+| `"special": "scratchpad"` | the `scratchpad` special workspace |
+
+`special` wins if both are set. In the panel these are the **Place on** and
+**Or a scratchpad** pickers above the numbered grid.
+
+### Per-monitor workspaces
+
+`monitor` is a screen's *workspace-name key*, as
+[mmsbrggr.per-monitor-workspaces](https://github.com/mmsbrggr/omarchy-per-monitor-workspaces)
+builds it — that plugin names each screen's workspaces `<key>:<slot>`, and this
+targets the same names, so an assignment lands on the workspace that plugin's
+bar actually shows.
+
+The key is the monitor's description, with the connector appended when two
+screens describe themselves alike, or the connector alone when there is no
+description. List them with:
+
+```sh
+./auto-workspace.sh --monitor-keys
+```
+
+The panel shows connectors (`eDP-1`) and stores keys, so there is nothing to
+type. Per-monitor targeting works without that plugin installed — it is only
+the naming scheme that is shared — but the bar will not show those workspaces.
+
+**An assignment whose monitor is not connected is skipped, not moved.** Boot
+undocked and your external screens' assignments simply do not launch, rather
+than piling onto the laptop.
+
+### Scratchpads
+
+`special` is a Hyprland special workspace — what `SUPER+S` toggles. The panel
+lists the ones that exist right now, and takes a typed name for one that does
+not; a special workspace only exists while it holds a window, so a name you
+have not used yet will not be offered until something is in it.
+
+With Omarchy's `hide_special_on_workspace_change`, an app launched into a
+scratchpad stays out of the way until you press its key.
+
+## Tests
+
+The targeting model, the monitor-key algorithm and the selector validation are
+plain JS and bash, and are tested without a compositor:
+
+```sh
+node --test tests/
+```
+
+The monitor-key and target-resolution logic exists twice — `Model.js` for the
+panel, jq and bash in `auto-workspace.sh` for the launcher — because the two
+runtimes cannot share code. `tests/monitor-keys.test.js` and
+`tests/resolve-target.test.js` run both over the same fixtures and assert they
+agree, because a disagreement is silent: assignments would launch onto
+workspaces the bar does not show. Run them after touching either copy.
 
 ## Config
 
