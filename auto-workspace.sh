@@ -622,7 +622,7 @@ cmd_launch_all() {
     if [[ "$item_only" == "1" ]]; then item_only="true"; fi
     if [[ "$item_only" == "0" ]]; then item_only="false"; fi
     if [[ "$item_only" == "true" && "$force" != "true" && -n "$last_boot" && "$last_boot" == "$boot_id" ]]; then
-      echo "skip $name on ws $ws — already launched this boot (once per boot)"
+      echo "skip $name on $selector — already launched this boot (once per boot)"
       continue
     fi
 
@@ -648,7 +648,7 @@ cmd_launch_all() {
             end;
           any(.[]; ws_ok($ws) and ((.class|ascii_downcase)==($appid|ascii_downcase) or (.initialClass|ascii_downcase)==($appid|ascii_downcase)))
         ' >/dev/null 2>&1; then
-          echo "skip $name on ws $ws — already running ($app_id)"
+          echo "skip $name on $selector — already running ($app_id)"
           continue
         fi
       elif [[ -n "$basename" && "$basename" != "." ]]; then
@@ -661,7 +661,7 @@ cmd_launch_all() {
             end;
           any(.[]; ws_ok($ws) and ((.class|ascii_downcase)==($bn|ascii_downcase) or (.initialClass|ascii_downcase)==($bn|ascii_downcase)))
         ' >/dev/null 2>&1; then
-          echo "skip $name on ws $ws — already running ($basename)"
+          echo "skip $name on $selector — already running ($basename)"
           continue
         fi
       fi
