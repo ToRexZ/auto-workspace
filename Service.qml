@@ -4,6 +4,8 @@ import Quickshell
 import Quickshell.Io
 import QtQuick
 
+import "Model.js" as Model
+
 Item {
     id: root
 
@@ -134,9 +136,13 @@ Item {
         launchProc.running = true
     }
 
+    // `workspace` is a selector as Model.resolveTarget produces it: a global
+    // slot number, "special:<name>", or "name:<workspace>" for a per-monitor
+    // slot. Validated in Model.js so the panel, the service and the launcher
+    // cannot disagree about what is acceptable.
     function launchOnWorkspace(workspace, execCmd) {
         var ws = String(workspace)
-        if (!(ws.match(/^[0-9]+$/) || ws.indexOf("special:") === 0)) {
+        if (!Model.isValidSelector(ws)) {
             root.log("launchOnWorkspace: invalid workspace " + ws)
             return
         }

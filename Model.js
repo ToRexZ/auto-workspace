@@ -29,8 +29,30 @@ function defaultOnlyOnBootForType(type) {
 }
 
 function normalizeAssignment(a) {
+    // Always a usable slot number. The old guard let a non-numeric workspace
+    // through as NaN, which JSON.stringify writes as null -- so a special
+    // workspace assignment lost its target the moment it was saved. The target
+    // kind now lives in `monitor`/`special`, and `workspace` is only ever the
+    // slot number those two are read against.
     var ws = parseInt(a.workspace, 10)
-    if (!(ws >= 1 && ws <= 10) && String(a.workspace).indexOf("special:") !== 0) ws = 1
+    if (!(ws >= 1 && ws <= 10)) ws = 1
+
+    // A Hyprland special workspace, stored without its "special:" prefix so the
+    // stored value is the bare name the user typed and sees.
+    //
+    // Before the target kind had its own field, `workspace` itself could hold
+    // "special:<name>" -- the validators accepted it and normalizeAssignment
+    // then threw it away. Migrate that form rather than lose the assignment.
+    var rawSpecial = a.special
+    if (!rawSpecial && String(a.workspace || "").indexOf("special:") === 0) rawSpecial = a.workspace
+    var special = rawSpecial ? String(rawSpecial).replace(/^special:/, "").slice(0, 64) : null
+    if (special === "") special = null
+
+    // A monitor key as monitorKey() below computes it -- the prefix that
+    // mmsbrggr.per-monitor-workspaces gives that screen's workspace names.
+    var monitor = a.monitor ? String(a.monitor).slice(0, 128) : null
+    if (monitor === "") monitor = null
+
     var type = (a.type === "webapp" || a.type === "app" || a.type === "custom") ? a.type : "app"
     var onlyOnBoot = defaultOnlyOnBootForType(type)
     if (typeof a.onlyOnBoot === "boolean") {
@@ -43,6 +65,8 @@ function normalizeAssignment(a) {
     return {
         id: String(a.id || makeId()),
         workspace: ws,
+        monitor: monitor,
+        special: special,
         name: String(a.name || a.command || "App").slice(0, 80),
         command: String(a.command || a.exec || "").slice(0, 500),
         exec: String(a.exec || a.command || "").slice(0, 500),
@@ -70,6 +94,100 @@ function sanitizeConfig(cfg) {
     }
     out.version = 1
     return out
+}
+
+// The prefix mmsbrggr.per-monitor-workspaces gives a screen's workspace names,
+// so a monitor-targeted assignment addresses the same workspace the bar shows.
+//
+// This mirrors monitor_key() in that plugin's hypr/actions.lua, which warns that
+// its own Lua and QML copies "cannot share code -- different runtimes -- and if
+// they disagree the dots and the keys quietly address different workspaces".
+// This is a third copy, and the same warning applies: the three rules below --
+// description, description@connector when two screens describe themselves
+// alike, connector when there is no description -- must stay in step with it.
+//
+// `monitors` is every connected monitor, as `hyprctl monitors -j` reports them.
+function monitorKey(monitor, monitors) {
+    if (!monitor) return ""
+    var description = monitor.description ? String(monitor.description) : ""
+    if (description === "") return String(monitor.name || "")
+
+    var list = monitors || []
+    for (var i = 0; i < list.length; i++) {
+        var other = list[i]
+        if (!other) continue
+        if (String(other.name) !== String(monitor.name)
+            && String(other.description || "") === description) {
+            return description + "@" + String(monitor.name)
+        }
+    }
+    return description
+}
+
+// What the launcher needs to place an assignment, or null to skip it.
+//
+// `selector` is what Hyprland's [workspace ...] rule and window.move accept;
+// `name` is the bare workspace name that turns up in `hyprctl clients` JSON.
+// They differ for a per-monitor slot -- only the selector carries the "name:"
+// prefix -- and conflating them breaks the launcher's check that the window
+// actually landed where it was sent.
+//
+// A monitor that is not connected resolves to null: its assignments are skipped
+// rather than piled onto whichever screen happens to be present.
+function resolveTarget(a, liveMonitorKeys) {
+    if (!a) return null
+
+    if (a.special) {
+        var specialName = "special:" + a.special
+        return { selector: specialName, name: specialName }
+    }
+
+    if (a.monitor) {
+        var keys = liveMonitorKeys || []
+        if (keys.indexOf(a.monitor) === -1) return null
+        var wsName = a.monitor + ":" + a.workspace
+        return { selector: "name:" + wsName, name: wsName }
+    }
+
+    return { selector: String(a.workspace), name: String(a.workspace) }
+}
+
+// Is this a workspace selector we are willing to hand to Hyprland?
+//
+// The selector is interpolated into hl.exec_cmd("[workspace <sel> silent] ...")
+// -- a Lua string inside a Hyprland rule -- so the characters that could close
+// either are refused here rather than escaped further down. Monitor
+// descriptions are free text and legitimately contain spaces and dots, so the
+// name forms allow those while excluding quotes, backslashes, brackets,
+// newlines and control characters.
+//
+// Three kinds, matching resolveTarget's output:
+//   "<n>"                  a global workspace slot
+//   "name:<workspace>"     a named workspace, which is how a per-monitor slot
+//                          is addressed
+//   "special:<name>"       a special (scratchpad) workspace
+function isValidSelector(selector) {
+    var s = String(selector == null ? "" : selector)
+    if (s.length === 0 || s.length > 200) return false
+
+    // Nothing that could terminate the Lua string or the [workspace ...] rule.
+    if (/["'\\\[\]\n\r\t\0]/.test(s)) return false
+    if (/[\x00-\x1f\x7f]/.test(s)) return false
+
+    if (/^[0-9]+$/.test(s)) return true
+    if (s.indexOf("name:") === 0) return s.length > "name:".length
+    if (s.indexOf("special:") === 0) return s.length > "special:".length
+    return false
+}
+
+// A stable identity for "the workspace this assignment targets", for grouping
+// in the panel. Slot 2 on one screen and slot 2 on another are different
+// workspaces, so the monitor has to be part of the key.
+function targetKey(a) {
+    if (!a) return ""
+    if (a.special) return "special:" + a.special
+    if (a.monitor) return "mon:" + a.monitor + ":" + a.workspace
+    return "ws:" + a.workspace
 }
 
 function execForAssignment(a) {

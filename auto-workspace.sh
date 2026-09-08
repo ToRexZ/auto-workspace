@@ -207,6 +207,82 @@ wait_for_hyprland() {
   return 0
 }
 
+# The prefix mmsbrggr.per-monitor-workspaces gives a screen's workspace names.
+#
+# Three rules, and they must match monitorKey() in Model.js exactly -- the two
+# copies cannot share code, and a disagreement is silent: apps land on
+# workspaces the bar does not show. tests/monitor-keys.test.js pins the two
+# implementations to each other over the same fixtures, so run it after touching
+# either.
+#
+#   description                     when it is unique
+#   description@connector           when two screens describe themselves alike
+#   connector                       when there is no description
+#
+# Reads `hyprctl monitors -j` on stdin when given "-", so it is testable without
+# a compositor.
+monitor_keys() {
+  # Only an explicit "-" means stdin. An absent argument must fall through to
+  # the live compositor, so "${1:-}" and not "${1:--}".
+  local src="${1:-}"
+  local json
+  if [[ "$src" == "-" ]]; then
+    json=$(cat)
+  else
+    json=$("$_HYPRCTL" monitors -j 2>/dev/null)
+  fi
+  [[ -z "$json" ]] && return 0
+  printf '%s' "$json" | "$_JQ" -r '
+    . as $all
+    | .[]
+    | . as $m
+    | (($m.description // "")) as $d
+    | if $d == "" then ($m.name // "")
+      else
+        if ([$all[] | select((.name // "") != ($m.name // "") and (.description // "") == $d)] | length) > 0
+        then $d + "@" + ($m.name // "")
+        else $d
+        end
+      end
+  '
+}
+
+# Turn one assignment's stored target into the workspace selector to launch on,
+# or print nothing when the target is not reachable.
+#
+# Mirrors resolveTarget() in Model.js. A monitor that is not connected yields
+# nothing, so its assignments are skipped rather than piled onto whichever
+# screen happens to be present.
+#
+# Prints "<selector>" -- the form Hyprland's [workspace ...] rule accepts. The
+# bare workspace name that appears in `hyprctl clients` JSON is that with any
+# leading "name:" removed; see target_name below.
+resolve_target() {
+  local workspace="$1" monitor="${2:-}" special="${3:-}" keys="${4:-}"
+
+  if [[ -n "$special" && "$special" != "null" ]]; then
+    printf 'special:%s\n' "${special#special:}"
+    return 0
+  fi
+
+  if [[ -n "$monitor" && "$monitor" != "null" ]]; then
+    # Exact line match: a description is free text and can contain anything.
+    if ! printf '%s' "$keys" | grep -qxF -- "$monitor"; then
+      return 0
+    fi
+    printf 'name:%s:%s\n' "$monitor" "$workspace"
+    return 0
+  fi
+
+  printf '%s\n' "$workspace"
+}
+
+# The bare workspace name for a selector, for comparing against
+# `hyprctl clients -j`, whose .workspace.name never carries a "name:" prefix.
+target_name() {
+  printf '%s\n' "${1#name:}"
+}
+
 cmd_launch() {
   local workspace="$1"
   local exec_cmd="$2"
@@ -215,8 +291,11 @@ cmd_launch() {
     echo "usage: $0 --launch <workspace> <exec> [silent]" >&2
     exit 1
   fi
-  # Validate workspace 1-10 or special
-  if ! [[ "$workspace" =~ ^[0-9]+$ ]] && ! [[ "$workspace" =~ ^special: ]]; then
+  # Validate a workspace selector: a global slot number, a special workspace, or
+  # a named one (which is how a per-monitor slot is addressed).
+  if ! [[ "$workspace" =~ ^[0-9]+$ ]] \
+    && ! [[ "$workspace" =~ ^special: ]] \
+    && ! [[ "$workspace" =~ ^name:.+ ]]; then
     echo "invalid workspace: $workspace" >&2
     exit 1
   fi
@@ -284,7 +363,11 @@ cmd_launch() {
   # For every launch, verify the new window(s) land on the target workspace.
   # Chromium shares a profile — new windows often appear on the focused ws (ws1),
   # so we explicitly move any newly-created window to the assigned workspace.
+  # The selector goes to Hyprland; the bare name is what `hyprctl clients` JSON
+  # reports, so the "did it land?" checks below have to compare against that.
   local target_ws="$workspace"
+  local target_ws_name
+  target_ws_name=$(target_name "$workspace")
   local ok=false
   local tries=40
   for _try in $(seq 1 $tries); do
@@ -311,7 +394,7 @@ cmd_launch() {
         fi
         # Skip if already on the right workspace
         local on_ws
-        on_ws=$("$_HYPRCTL" clients -j 2>/dev/null | "$_JQ" -r --arg a "$addr" --arg ws "$target_ws" '
+        on_ws=$("$_HYPRCTL" clients -j 2>/dev/null | "$_JQ" -r --arg a "$addr" --arg ws "$target_ws_name" '
           def ws_ok($ws):
             if ($ws|test("^[0-9]+$")) then
               (.workspace.id == ($ws|tonumber) or .workspace.name == $ws)
@@ -358,7 +441,7 @@ cmd_launch() {
               fi
             fi
             local on_ws2
-            on_ws2=$("$_HYPRCTL" clients -j 2>/dev/null | "$_JQ" -r --arg a "$addr" --arg ws "$target_ws" '
+            on_ws2=$("$_HYPRCTL" clients -j 2>/dev/null | "$_JQ" -r --arg a "$addr" --arg ws "$target_ws_name" '
               def ws_ok($ws):
                 if ($ws|test("^[0-9]+$")) then
                   (.workspace.id == ($ws|tonumber) or .workspace.name == $ws)
@@ -439,6 +522,12 @@ cmd_launch_all() {
     echo "$(date -u) boot_id=$boot_id assignments=$count force=$force" >> "$boot_log" 2>/dev/null || true
   fi
 
+  # Live monitor keys, read once for the whole pass. An assignment pinned to a
+  # screen that is not connected is skipped, not redirected -- otherwise an
+  # undocked boot piles every screen's assignments onto the one that is present.
+  local live_keys
+  live_keys=$(monitor_keys)
+
   # Iterate enabled assignments
   local idx=0
   jq -c '.assignments[] | select(.enabled==true)' "$CONFIG_FILE" 2>/dev/null | while read -r item; do
@@ -451,6 +540,19 @@ cmd_launch_all() {
       echo "skip invalid item: $item" >&2
       continue
     fi
+
+    # Where this assignment actually goes: a global slot, this screen's slot, or
+    # a special workspace. Empty means the monitor it wants is not here.
+    local mon spec selector ws_name
+    mon=$(echo "$item" | "$_JQ" -r '.monitor // empty')
+    spec=$(echo "$item" | "$_JQ" -r '.special // empty')
+    selector=$(resolve_target "$ws" "$mon" "$spec" "$live_keys")
+    if [[ -z "$selector" ]]; then
+      echo "skip $name — monitor not connected ($mon)"
+      echo "$(date -u) SKIP name=$name monitor=$mon" >> "$boot_log" 2>/dev/null || true
+      continue
+    fi
+    ws_name=$(target_name "$selector")
 
     # Per-item once-per-boot (type default: webapp true, app false, custom true via Model.js)
     local item_only
@@ -480,7 +582,7 @@ cmd_launch_all() {
       if [[ "$exec_cmd" == omarchy-launch-webapp* || "$exec_cmd" == chromium* || "$exec_cmd" == google-chrome* || "$exec_cmd" == firefox* ]]; then
         :
       elif [[ -n "$app_id" ]]; then
-        if "$_HYPRCTL" clients -j 2>/dev/null | "$_JQ" -e --arg ws "$ws" --arg appid "$app_id" '
+        if "$_HYPRCTL" clients -j 2>/dev/null | "$_JQ" -e --arg ws "$ws_name" --arg appid "$app_id" '
           def ws_ok($ws):
             if ($ws|test("^[0-9]+$")) then
               (.workspace.id == ($ws|tonumber) or .workspace.name == $ws)
@@ -493,7 +595,7 @@ cmd_launch_all() {
           continue
         fi
       elif [[ -n "$basename" && "$basename" != "." ]]; then
-        if "$_HYPRCTL" clients -j 2>/dev/null | "$_JQ" -e --arg ws "$ws" --arg bn "$basename" '
+        if "$_HYPRCTL" clients -j 2>/dev/null | "$_JQ" -e --arg ws "$ws_name" --arg bn "$basename" '
           def ws_ok($ws):
             if ($ws|test("^[0-9]+$")) then
               (.workspace.id == ($ws|tonumber) or .workspace.name == $ws)
@@ -508,16 +610,16 @@ cmd_launch_all() {
       fi
     fi
 
-    echo "launching [$ws] $name: $exec_cmd (silent=$silent)"
-    echo "$(date -u) START ws=$ws name=$name exec=$exec_cmd" >> "$boot_log" 2>/dev/null || true
+    echo "launching [$selector] $name: $exec_cmd (silent=$silent)"
+    echo "$(date -u) START ws=$selector name=$name exec=$exec_cmd" >> "$boot_log" 2>/dev/null || true
     # stagger except first
     if [[ "$idx" -gt 0 && "$stagger" -gt 0 ]]; then
       sleep "$(awk "BEGIN {print $stagger/1000}")"
     fi
-    if cmd_launch "$ws" "$exec_cmd" "$silent"; then
-      echo "$(date -u) OK ws=$ws name=$name" >> "$boot_log" 2>/dev/null || true
+    if cmd_launch "$selector" "$exec_cmd" "$silent"; then
+      echo "$(date -u) OK ws=$selector name=$name" >> "$boot_log" 2>/dev/null || true
     else
-      echo "$(date -u) FAIL ws=$ws name=$name" >> "$boot_log" 2>/dev/null || true
+      echo "$(date -u) FAIL ws=$selector name=$name" >> "$boot_log" 2>/dev/null || true
       echo "failed to launch $name" >&2
     fi
     idx=$((idx+1))
@@ -608,6 +710,7 @@ case "${1:-}" in
   --force-launch-all) cmd_launch_all "true" ;;
   --default-config) default_config ;;
   --hypr-facts) cmd_hypr_facts ;;
+  --monitor-keys) shift; monitor_keys "${1:-}" ;;
   --set-workspace-layout) shift; cmd_set_workspace_layout "$@" ;;
   --help|-h|"") cat <<'HELP'
 auto-workspace.sh — helper for tenzin.auto-workspace
@@ -620,6 +723,8 @@ auto-workspace.sh — helper for tenzin.auto-workspace
   --force-launch-all      always launch regardless of settings
   --default-config        print default config
   --hypr-facts            print layout/gaps/monitor facts plus per-workspace layouts
+  --monitor-keys [-]      print each connected screen's workspace-name key
+                          (reads `hyprctl monitors -j` on stdin when given "-")
   --set-workspace-layout <ws> <dwindle|scrolling|master>
                           set one workspace's layout (same persist path as Super+L)
 HELP
