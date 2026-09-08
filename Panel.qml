@@ -58,6 +58,18 @@ Panel {
     property var liveMonitors: []
     property var liveSpecials: []
 
+    // Which half the right column shows. The panel otherwise only ever displays
+    // the assignments on the selected target, so seeing all of them means
+    // clicking through every screen x workspace x scratchpad combination.
+    property string rightView: "preview"
+
+    // Just the keys, for Model.resolveTarget.
+    readonly property var liveMonitorKeys: {
+        var out = []
+        for (var i = 0; i < liveMonitors.length; i++) out.push(String(liveMonitors[i].key))
+        return out
+    }
+
     // The form's current target, shaped like an assignment so the Model helpers
     // apply to it unchanged.
     readonly property var formTarget: ({
@@ -173,6 +185,48 @@ Panel {
     function persistFormWorkspace() {
         var s=Model.clone(root.config); s.settings.lastFormWorkspace=root.formWorkspace; root.config=s; root.saveConfig()
     }
+    // Enable or disable one assignment without deleting it.
+    function setAssignmentEnabled(id, on) {
+        var out = []
+        for (var i = 0; i < root.assignments.length; i++) {
+            var a = Model.clone(root.assignments[i])
+            if (a.id === id) a.enabled = !!on
+            out.push(a)
+        }
+        root.assignments = out
+        root.config.assignments = out.slice()
+        root.saveConfig()
+        root.countsChanged()
+    }
+
+    // Point the pickers at an assignment's target, so its row can be used to
+    // navigate to the workspace it belongs to.
+    function selectAssignmentTarget(a) {
+        if (!a) return
+        root.formSpecial = a.special ? String(a.special) : ""
+        root.specialChoice = root.formSpecial
+        root.formMonitor = a.monitor ? String(a.monitor) : ""
+        root.formWorkspace = a.workspace
+        root.workspacePicked = true
+    }
+
+    // Launch one assignment now, on whatever target it names. Nothing happens
+    // for an assignment pinned to a screen that is not connected -- the same
+    // rule the boot pass follows.
+    function launchAssignmentNow(a) {
+        if (!a) return
+        var target = Model.resolveTarget(a, root.liveMonitorKeys)
+        if (!target) {
+            root.statusText = "Skipped " + a.name + " — its screen is not connected"
+            clearStatusTimer.restart()
+            return
+        }
+        singleLaunchProc.command = ["/usr/bin/bash", root.script, "--launch", target.selector, a.exec, "true"]
+        singleLaunchProc.running = true
+        root.statusText = "Launching " + a.name + " → " + Model.targetLabel(a, root.liveMonitors)
+        clearStatusTimer.restart()
+    }
+
     function removeAssignment(id) {
         root.assignments=root.assignments.filter(function(a){return a.id!==id})
         root.config.assignments=root.assignments.slice()
@@ -359,6 +413,19 @@ Panel {
     Timer { id: layoutWatchdog; interval: 10000; repeat: false; onTriggered: if (layoutProc.running) layoutProc.running = false }
     Timer { id: layoutToggleWatchdog; interval: 10000; repeat: false; onTriggered: if (layoutToggleProc.running) layoutToggleProc.running = false }
     Timer { id: appsWatchdog; interval: 15000; repeat: false; onTriggered: if (appsProc.running) appsProc.running = false }
+    Process {
+        id: singleLaunchProc
+        onRunningChanged: if (running) singleLaunchWatchdog.restart(); else singleLaunchWatchdog.stop()
+        stdout: StdioCollector { waitForEnd: true }
+        stderr: StdioCollector { id: singleLaunchErr; waitForEnd: true }
+        onExited: function(code) {
+            if (code === 0) return
+            root.statusText = "Launch failed" + (singleLaunchErr.text ? ": " + singleLaunchErr.text.trim().split("\n")[0] : "")
+            clearStatusTimer.restart()
+        }
+    }
+    Timer { id: singleLaunchWatchdog; interval: 20000; repeat: false; onTriggered: if (singleLaunchProc.running) singleLaunchProc.running = false }
+
     Timer { id: targetsWatchdog; interval: 10000; repeat: false; onTriggered: if (targetsProc.running) targetsProc.running = false }
     function parseWorkspaceLayouts(s) {
         var out = {}
@@ -867,13 +934,22 @@ Panel {
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: Style.space(8)
-                            PanelSectionHeader {
-                                text: "PREVIEW"
-                                foreground: root.foreground
-                                fontFamily: root.fontFamily
-                                Layout.fillWidth: true
+                            Button {
+                                text: "Preview"
+                                selected: root.rightView === "preview"
+                                verticalPadding: Style.space(4)
+                                onClicked: root.rightView = "preview"
                             }
                             Button {
+                                text: "Assignments (" + root.assignments.length + ")"
+                                tooltipText: "Every assignment, on every screen and scratchpad"
+                                selected: root.rightView === "assignments"
+                                verticalPadding: Style.space(4)
+                                onClicked: root.rightView = "assignments"
+                            }
+                            Item { Layout.fillWidth: true }
+                            Button {
+                                visible: root.rightView === "preview"
                                 text: root.hyprLayout === "scrolling" ? "⇄ dwindle" : "⇄ scrolling"
                                 tooltipText: root.formSpecial !== "" || root.formMonitor !== ""
                                     ? "Layouts are saved per global workspace, so this does not apply to " + root.formTargetLabel
@@ -886,9 +962,12 @@ Panel {
                         }
 
                         WorkspacePreview {
+                            visible: root.rightView === "preview"
                             Layout.fillWidth: true
-                            Layout.fillHeight: true
-                            Layout.minimumHeight: Math.min(Style.space(200), Math.round(panel.screenH * 0.3))
+                            Layout.fillHeight: root.rightView === "preview"
+                            Layout.preferredHeight: root.rightView === "preview" ? -1 : 0
+                            Layout.minimumHeight: root.rightView === "preview"
+                                ? Math.min(Style.space(200), Math.round(panel.screenH * 0.3)) : 0
                             bar: root.bar
                             workspace: root.formWorkspace
                             targetLabel: root.formTargetLabel
@@ -911,6 +990,129 @@ Panel {
                             barSizeW: panel.barW
                             onMoveApp: function(fromIdx, toIdx) { root.reorderAssignment(root.formTargetKey, fromIdx, toIdx) }
                         }
+
+                        // Every assignment, whatever screen or scratchpad it is
+                        // on. The rest of the panel is scoped to one target, so
+                        // this is the only place the whole set is visible.
+                        ScrollView {
+                            id: assignmentsScroll
+                            visible: root.rightView === "assignments"
+                            Layout.fillWidth: true
+                            Layout.fillHeight: root.rightView === "assignments"
+                            Layout.minimumHeight: root.rightView === "assignments"
+                                ? Math.min(Style.space(200), Math.round(panel.screenH * 0.3)) : 0
+                            Layout.preferredHeight: root.rightView === "assignments" ? -1 : 0
+                            clip: true
+                            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                            ScrollBar.vertical.policy: ScrollBar.AsNeeded
+
+                            Column {
+                                width: assignmentsScroll.width
+                                spacing: Style.space(4)
+
+                                Repeater {
+                                    model: root.assignments
+                                    delegate: Rectangle {
+                                        required property var modelData
+                                        required property int index
+                                        readonly property bool isCurrent: Model.targetKey(modelData) === root.formTargetKey
+
+                                        width: parent ? parent.width : 0
+                                        height: Style.space(44)
+                                        radius: Style.space(6)
+                                        // The rows on the target the pickers point at are
+                                        // the ones the rest of the panel is acting on.
+                                        color: isCurrent ? Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.07)
+                                                         : "transparent"
+
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: root.selectAssignmentTarget(modelData)
+                                        }
+
+                                        RowLayout {
+                                            anchors.fill: parent
+                                            anchors.leftMargin: Style.space(10)
+                                            anchors.rightMargin: Style.space(8)
+                                            spacing: Style.space(8)
+
+                                            ColumnLayout {
+                                                Layout.fillWidth: true
+                                                spacing: 0
+                                                Text {
+                                                    textFormat: Text.PlainText
+                                                    Layout.fillWidth: true
+                                                    elide: Text.ElideRight
+                                                    text: modelData.name
+                                                    color: modelData.enabled === false ? root.dim : root.foreground
+                                                    font.family: root.fontFamily
+                                                    font.pixelSize: Style.font.body
+                                                }
+                                                Text {
+                                                    textFormat: Text.PlainText
+                                                    Layout.fillWidth: true
+                                                    elide: Text.ElideRight
+                                                    text: Model.targetLabel(modelData, root.liveMonitors)
+                                                        + " · " + modelData.type
+                                                        + (modelData.onlyOnBoot ? "" : " · every restart")
+                                                    color: root.dim
+                                                    font.family: root.fontFamily
+                                                    font.pixelSize: Style.font.caption - 1
+                                                }
+                                            }
+
+                                            Button {
+                                                text: "↗"
+                                                tooltipText: "Launch " + modelData.name + " now"
+                                                horizontalPadding: Style.space(8)
+                                                verticalPadding: Style.space(2)
+                                                onClicked: root.launchAssignmentNow(modelData)
+                                            }
+
+                                            ToggleSwitch {
+                                                checked: modelData.enabled !== false
+                                                onToggled: root.setAssignmentEnabled(modelData.id, !(modelData.enabled !== false))
+                                            }
+
+                                            Button {
+                                                text: "✕"
+                                                tooltipText: "Remove " + modelData.name + " from " + Model.targetLabel(modelData, root.liveMonitors)
+                                                horizontalPadding: Style.space(8)
+                                                verticalPadding: Style.space(2)
+                                                onClicked: {
+                                                    root.statusText = "Removed " + modelData.name
+                                                    clearStatusTimer.restart()
+                                                    root.removeAssignment(modelData.id)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Text {
+                                    textFormat: Text.PlainText
+                                    visible: root.assignments.length === 0
+                                    width: parent ? parent.width : 0
+                                    text: "No assignments yet — search for an app and toggle it on."
+                                    color: root.dim
+                                    font.family: root.fontFamily
+                                    font.pixelSize: Style.font.caption
+                                }
+                            }
+                        }
+
+                        Text {
+                            textFormat: Text.PlainText
+                            visible: root.rightView === "assignments"
+                            Layout.fillWidth: true
+                            wrapMode: Text.WordWrap
+                            text: "Click a row to point the pickers at its workspace · ↗ launches it now · ✕ removes it"
+                            color: root.dim
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.caption - 1
+                        }
+
                         Text {
                             textFormat: Text.PlainText
                             Layout.fillWidth: true
@@ -924,7 +1126,7 @@ Panel {
                             color: root.dim
                             font.family: root.fontFamily
                             font.pixelSize: Style.font.caption - 1
-                            visible: root.addedApps.length > 1
+                            visible: root.rightView === "preview" && root.addedApps.length > 1
                         }
                     }
                 }
