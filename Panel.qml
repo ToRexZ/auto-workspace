@@ -47,6 +47,12 @@ Panel {
     property string formMonitor: ""
     property string formSpecial: ""
 
+    // The scratchpad dropdown's own selection. Distinct from formSpecial because
+    // one option is a mode ("New scratchpad...") rather than a workspace name;
+    // in that mode formSpecial comes from the text field instead.
+    readonly property string newSpecialSentinel: "\u0000new"
+    property string specialChoice: ""
+
     // Offered in the pickers, from `auto-workspace.sh --targets`.
     // liveMonitors: [{ key, name, description }]; liveSpecials: ["scratchpad"]
     property var liveMonitors: []
@@ -107,6 +113,8 @@ Panel {
     })()
 
     function open() { root.controller.show(); loadConfig(); layoutProc.running = true; targetsProc.running = true; root.workspacePicked = true }
+
+
     function close() { root.controller.hide() }
     function toggle() { root.opened ? root.close() : root.open() }
     function closeForPopoutSwitch() { root.close() }
@@ -606,61 +614,101 @@ Panel {
                         Layout.alignment: Qt.AlignTop
                         spacing: Style.space(10)
 
-                        PanelSectionHeader {
-                            text: "PLACE ON"
-                            foreground: root.foreground
-                            fontFamily: root.fontFamily
-                        }
-
-                        // Which screen's workspaces the slot number below means.
+                        // Target pickers.
                         //
-                        // "Any screen" is Omarchy's global workspaces, and the
-                        // upstream behaviour. Naming a screen pins the
-                        // assignment to that screen's slot -- and an assignment
-                        // pinned to a screen that is not connected at launch is
-                        // skipped, not moved to another screen.
-                        Flow {
+                        // Dropdowns rather than rows of buttons on purpose: this
+                        // column is ~255px wide, so a button per screen wraps to
+                        // two lines, and a button per scratchpad to two more. That
+                        // cost 233px of fixed height and starved the app-results
+                        // list below, which is the only Layout.fillHeight item
+                        // here -- it collapsed to 8px and the search looked
+                        // broken. A dropdown is one row whatever the option count.
+                        Dropdown {
                             Layout.fillWidth: true
-                            spacing: Style.space(4)
+                            label: "Screen"
+                            fontFamily: root.fontFamily
                             enabled: root.formSpecial === ""
                             opacity: enabled ? 1.0 : 0.4
-
-                            Button {
-                                text: "Any screen"
-                                tooltipText: "Omarchy's global workspaces"
-                                selected: root.formMonitor === ""
-                                verticalPadding: Style.space(4)
-                                onClicked: root.formMonitor = ""
+                            // "" is Omarchy's global workspaces, the upstream
+                            // behaviour. A named screen pins the assignment, and
+                            // it is skipped when that screen is not connected.
+                            options: {
+                                var out = [{ value: "", label: "Any screen (global)" }]
+                                for (var i = 0; i < root.liveMonitors.length; i++) {
+                                    var m = root.liveMonitors[i]
+                                    out.push({ value: String(m.key), label: String(m.name) })
+                                }
+                                return out
                             }
-                            Repeater {
-                                model: root.liveMonitors
-                                delegate: Button {
-                                    required property var modelData
-                                    text: modelData.name
-                                    tooltipText: modelData.description
-                                        ? modelData.description + " — this screen's own workspaces"
-                                        : "This screen's own workspaces"
-                                    selected: root.formMonitor === modelData.key
-                                    verticalPadding: Style.space(4)
-                                    onClicked: root.formMonitor = modelData.key
+                            value: root.formMonitor
+                            onChanged: function(v) { root.formMonitor = String(v) }
+                        }
+
+                        Dropdown {
+                            id: specialDropdown
+                            Layout.fillWidth: true
+                            label: "Scratchpad"
+                            fontFamily: root.fontFamily
+                            // The specials Hyprland has right now, plus an escape
+                            // hatch: a special workspace exists only while it holds
+                            // a window, so one not yet opened cannot be listed.
+                            options: {
+                                var out = [{ value: "", label: "None (use workspace)" }]
+                                for (var i = 0; i < root.liveSpecials.length; i++) {
+                                    var name = String(root.liveSpecials[i])
+                                    out.push({ value: name, label: name })
+                                }
+                                out.push({ value: root.newSpecialSentinel, label: "New scratchpad..." })
+                                return out
+                            }
+                            value: root.specialChoice
+                            onChanged: function(v) {
+                                root.specialChoice = String(v)
+                                // The sentinel is a mode, not a name: the field
+                                // below supplies the actual name.
+                                root.formSpecial = root.specialChoice === root.newSpecialSentinel
+                                    ? specialNameField.text.trim()
+                                    : root.specialChoice
+                            }
+                        }
+
+                        TextField {
+                            id: specialNameField
+                            Layout.fillWidth: true
+                            visible: root.specialChoice === root.newSpecialSentinel
+                            verticalPadding: Style.space(9)
+                            placeholderText: "new scratchpad name (e.g. email)"
+                            foreground: root.foreground
+                            accent: Color.accent
+                            font.family: root.fontFamily
+                            onTextChanged: {
+                                if (root.specialChoice === root.newSpecialSentinel)
+                                    root.formSpecial = text.trim()
+                            }
+                            Keys.onPressed: function(event) {
+                                if (event.key === Qt.Key_Escape) {
+                                    root.close()
+                                    event.accepted = true
                                 }
                             }
                         }
 
                         PanelSectionHeader {
-                            text: root.formSpecial !== "" ? "PICK A WORKSPACE (NOT USED)" : "PICK A WORKSPACE"
+                            text: "PICK A WORKSPACE"
                             foreground: root.foreground
                             fontFamily: root.fontFamily
                         }
 
-                        // Workspace picker 1-10 (5 per row)
+                        // Workspace picker 1-10 (5 per row).
+                        //
+                        // Which screen's workspace 1-10 these mean is the Screen
+                        // dropdown above. A special workspace is not a numbered
+                        // slot, so the grid is disabled when one is chosen.
                         GridLayout {
                             Layout.fillWidth: true
                             columns: 5
                             columnSpacing: Style.space(4)
                             rowSpacing: Style.space(4)
-                            // A special workspace is not a numbered slot, so the
-                            // number below has nothing to say about it.
                             enabled: root.formSpecial === ""
                             opacity: enabled ? 1.0 : 0.4
                             Repeater {
@@ -673,85 +721,9 @@ Panel {
                                     verticalPadding: 0
                                     onClicked: { root.workspacePicked = true; root.formWorkspace=index+1; root.persistFormWorkspace() }
                                     Layout.fillWidth: true
-                                    Layout.preferredHeight: Style.space(38)
+                                    Layout.preferredHeight: Style.space(34)
                                 }
                             }
-                        }
-
-                        PanelSeparator {
-                            Layout.fillWidth: true
-                            foreground: root.foreground
-                        }
-
-                        PanelSectionHeader {
-                            text: "OR A SCRATCHPAD"
-                            foreground: root.foreground
-                            fontFamily: root.fontFamily
-                        }
-
-                        // Hyprland special workspaces -- what SUPER+S toggles.
-                        //
-                        // The buttons are the specials Hyprland has right now,
-                        // which is a convenience, not the set of allowed values:
-                        // a special workspace exists only while it holds a
-                        // window, so one you have not opened yet will not be
-                        // listed. Type its name instead and it is created on
-                        // first launch.
-                        Flow {
-                            Layout.fillWidth: true
-                            spacing: Style.space(4)
-
-                            Button {
-                                text: "None"
-                                tooltipText: "Use the numbered workspace above"
-                                selected: root.formSpecial === ""
-                                verticalPadding: Style.space(4)
-                                onClicked: { root.formSpecial = ""; specialField.text = "" }
-                            }
-                            Repeater {
-                                model: root.liveSpecials
-                                delegate: Button {
-                                    required property var modelData
-                                    text: String(modelData)
-                                    tooltipText: "special:" + String(modelData)
-                                    selected: root.formSpecial === String(modelData)
-                                    verticalPadding: Style.space(4)
-                                    onClicked: {
-                                        root.formSpecial = String(modelData)
-                                        specialField.text = String(modelData)
-                                    }
-                                }
-                            }
-                        }
-
-                        TextField {
-                            id: specialField
-                            Layout.fillWidth: true
-                            verticalPadding: Style.space(9)
-                            placeholderText: "or type a scratchpad name (e.g. email)..."
-                            foreground: root.foreground
-                            accent: Color.accent
-                            font.family: root.fontFamily
-                            // Deliberately not bound to formSpecial: the buttons
-                            // above write this field, and binding both ways would
-                            // fight itself.
-                            onTextChanged: root.formSpecial = text.trim()
-                            Keys.onPressed: function(event) {
-                                if (event.key === Qt.Key_Escape) {
-                                    root.close()
-                                    event.accepted = true
-                                }
-                            }
-                        }
-
-                        Text {
-                            textFormat: Text.PlainText
-                            Layout.fillWidth: true
-                            wrapMode: Text.WordWrap
-                            text: "Launching to " + root.formTargetLabel
-                            color: root.dim
-                            font.family: root.fontFamily
-                            font.pixelSize: Style.font.caption - 1
                         }
 
                         PanelSeparator {
@@ -839,6 +811,11 @@ Panel {
                             visible: root.filteredApps.length>0
                             Layout.fillWidth: true
                             Layout.fillHeight: true
+                            // A floor, because this is the only fillHeight item in
+                            // the column: anything added above it otherwise eats
+                            // its height silently and the search looks broken with
+                            // no error anywhere.
+                            Layout.minimumHeight: Style.space(120)
                             clip: true
                             ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
                             ScrollBar.vertical.policy: ScrollBar.AsNeeded
