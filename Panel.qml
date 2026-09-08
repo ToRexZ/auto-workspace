@@ -39,6 +39,28 @@ Panel {
     property string formName: ""
     property string formCommand: ""
     property string formType: "app"
+
+    // Where an assignment goes. Three kinds, and `special` wins over `monitor`:
+    //   formMonitor "" + formSpecial ""  -> a global workspace (upstream default)
+    //   formMonitor set                  -> that screen's workspace formWorkspace
+    //   formSpecial set                  -> that special (scratchpad) workspace
+    property string formMonitor: ""
+    property string formSpecial: ""
+
+    // Offered in the pickers, from `auto-workspace.sh --targets`.
+    // liveMonitors: [{ key, name, description }]; liveSpecials: ["scratchpad"]
+    property var liveMonitors: []
+    property var liveSpecials: []
+
+    // The form's current target, shaped like an assignment so the Model helpers
+    // apply to it unchanged.
+    readonly property var formTarget: ({
+        workspace: root.formWorkspace,
+        monitor: root.formSpecial !== "" ? null : (root.formMonitor !== "" ? root.formMonitor : null),
+        special: root.formSpecial !== "" ? root.formSpecial : null
+    })
+    readonly property string formTargetKey: Model.targetKey(root.formTarget)
+    readonly property string formTargetLabel: Model.targetLabel(root.formTarget, root.liveMonitors)
     property string formExecPreview: ""
     property bool formNameEdited: false
     property string autoName: ""
@@ -49,6 +71,10 @@ Panel {
     property string hyprLayoutDefault: "dwindle"
     property var workspaceLayouts: ({})
     readonly property string hyprLayout: {
+        // Per-workspace layouts are keyed by Hyprland's numeric workspace id, so
+        // they only describe a global slot. A per-monitor or special workspace
+        // has no such entry and falls back to the global default.
+        if (formSpecial !== "" || formMonitor !== "") return hyprLayoutDefault
         var mapped = workspaceLayouts[String(formWorkspace)]
         return mapped || hyprLayoutDefault
     }
@@ -80,7 +106,7 @@ Panel {
         return n
     })()
 
-    function open() { root.controller.show(); loadConfig(); layoutProc.running = true; root.workspacePicked = true }
+    function open() { root.controller.show(); loadConfig(); layoutProc.running = true; targetsProc.running = true; root.workspacePicked = true }
     function close() { root.controller.hide() }
     function toggle() { root.opened ? root.close() : root.open() }
     function closeForPopoutSwitch() { root.close() }
@@ -118,10 +144,17 @@ Panel {
         var execStr=cmd
         if (formType==="webapp" && (cmd.indexOf("http://")===0 || cmd.indexOf("https://")===0))
             execStr="omarchy-launch-webapp '" + cmd.replace(/'/g,"'\\''") + "'"
-        var item=Model.normalizeAssignment({workspace:formWorkspace, name:name, command:cmd, exec:execStr, type:formType, enabled:true, onlyOnBoot:true})
+        var item=Model.normalizeAssignment({
+            workspace:formWorkspace,
+            monitor:root.formTarget.monitor,
+            special:root.formTarget.special,
+            name:name, command:cmd, exec:execStr, type:formType, enabled:true, onlyOnBoot:true
+        })
         assignments=assignments.concat([item]); config.assignments=assignments.slice()
         formName=""; formCommand=""; formType="app"; formNameEdited=false
-        saveConfig(); statusText="Added "+item.name+" → WS"+item.workspace; clearStatusTimer.restart()
+        saveConfig()
+        statusText="Added "+item.name+" → "+Model.targetLabel(item, root.liveMonitors)
+        clearStatusTimer.restart()
         if (root.bar && typeof root.bar.broadcast === "function") root.bar.broadcast("refreshCounts")
         root.countsChanged()
     }
@@ -297,6 +330,7 @@ Panel {
     Timer { id: layoutWatchdog; interval: 10000; repeat: false; onTriggered: if (layoutProc.running) layoutProc.running = false }
     Timer { id: layoutToggleWatchdog; interval: 10000; repeat: false; onTriggered: if (layoutToggleProc.running) layoutToggleProc.running = false }
     Timer { id: appsWatchdog; interval: 15000; repeat: false; onTriggered: if (appsProc.running) appsProc.running = false }
+    Timer { id: targetsWatchdog; interval: 10000; repeat: false; onTriggered: if (targetsProc.running) targetsProc.running = false }
     function parseWorkspaceLayouts(s) {
         var out = {}
         if (!s) return out
@@ -357,6 +391,14 @@ Panel {
         }
     }
     function toggleHyprLayout() {
+        // Layouts persist per numeric workspace id, so there is nothing to write
+        // for a per-monitor or special workspace. Say so rather than write the
+        // wrong file.
+        if (root.formSpecial !== "" || root.formMonitor !== "") {
+            root.statusText = "Layout is per global workspace only"
+            clearStatusTimer.restart()
+            return
+        }
         var ws = root.formWorkspace
         var target = root.hyprLayout === "scrolling" ? "dwindle" : "scrolling"
         var map = {}
@@ -367,6 +409,29 @@ Panel {
         layoutToggleProc.command = ["/usr/bin/bash", root.script, "--set-workspace-layout", String(ws), target]
         layoutToggleProc.running = true
     }
+    // The screens that can be targeted, and the special workspaces that exist.
+    // Read through the script so the panel and the launcher compute monitor keys
+    // with the same code -- see monitor_keys() in auto-workspace.sh.
+    Process {
+        id: targetsProc
+        onRunningChanged: if (running) targetsWatchdog.restart(); else targetsWatchdog.stop()
+
+        command: ["/usr/bin/bash", root.script, "--targets"]
+        stdout: StdioCollector { id: targetsOut; waitForEnd: true }
+        onExited: function(code) {
+            if (code !== 0) return
+            var txt = (targetsOut.text || "").trim()
+            if (!txt) return
+            try {
+                var parsed = JSON.parse(txt)
+                root.liveMonitors = Array.isArray(parsed.monitors) ? parsed.monitors : []
+                root.liveSpecials = Array.isArray(parsed.specials) ? parsed.specials : []
+            } catch (e) {
+                console.log("[auto-workspace] could not parse --targets: " + e)
+            }
+        }
+    }
+
     // Keep layout facts fresh while the panel is visible
     Timer { id: layoutRefreshTimer; interval: 5000; repeat: true; running: root.opened; onTriggered: if (!layoutProc.running) layoutProc.running = true }
     Process {
@@ -428,19 +493,22 @@ Panel {
         sub.sort(root.alphabeticalCompare)
         return exact.concat(prefix, sub).slice(0, 6)
     }
-    function getAppsForWs(ws) {
+    // Grouped by target rather than by workspace number: slot 2 on one screen
+    // and slot 2 on another are different workspaces, and a special workspace is
+    // neither. `key` is a Model.targetKey.
+    function getAppsForTarget(key) {
         var out=[]
-        for(var i=0;i<assignments.length;i++) if(assignments[i].workspace===ws) out.push(assignments[i])
+        for(var i=0;i<assignments.length;i++) if(Model.targetKey(assignments[i])===key) out.push(assignments[i])
         return out
     }
     // Move an app within a workspace's launch/tiling order (drag & drop on preview).
     // fromLocal/toLocal are indices into that workspace's filtered list.
-    function reorderAssignment(ws, fromLocal, toLocal) {
+    function reorderAssignment(key, fromLocal, toLocal) {
         var wsIdx = []
         for (var i = 0; i < assignments.length; i++)
-            if (assignments[i].workspace === ws) wsIdx.push(i)
+            if (Model.targetKey(assignments[i]) === key) wsIdx.push(i)
         if (fromLocal < 0 || fromLocal >= wsIdx.length || toLocal < 0 || toLocal >= wsIdx.length || fromLocal === toLocal) return
-        console.log("[auto-workspace] reorder ws=" + ws + " " + fromLocal + " -> " + toLocal + " (wsItems=" + wsIdx.length + ")")
+        console.log("[auto-workspace] reorder target=" + key + " " + fromLocal + " -> " + toLocal + " (items=" + wsIdx.length + ")")
         var arr = assignments.slice()
         var seq = []
         for (var j = 0; j < wsIdx.length; j++) seq.push(arr[wsIdx[j]])
@@ -454,8 +522,9 @@ Panel {
         clearStatusTimer.restart()
     }
     property var addedApps: {
+        var key = root.formTargetKey
         var out=[]
-        for(var i=0;i<assignments.length;i++) if(assignments[i].workspace===formWorkspace) out.push(assignments[i])
+        for(var i=0;i<assignments.length;i++) if(Model.targetKey(assignments[i])===key) out.push(assignments[i])
         return out
     }
 
@@ -538,7 +607,48 @@ Panel {
                         spacing: Style.space(10)
 
                         PanelSectionHeader {
-                            text: "PICK A WORKSPACE"
+                            text: "PLACE ON"
+                            foreground: root.foreground
+                            fontFamily: root.fontFamily
+                        }
+
+                        // Which screen's workspaces the slot number below means.
+                        //
+                        // "Any screen" is Omarchy's global workspaces, and the
+                        // upstream behaviour. Naming a screen pins the
+                        // assignment to that screen's slot -- and an assignment
+                        // pinned to a screen that is not connected at launch is
+                        // skipped, not moved to another screen.
+                        Flow {
+                            Layout.fillWidth: true
+                            spacing: Style.space(4)
+                            enabled: root.formSpecial === ""
+                            opacity: enabled ? 1.0 : 0.4
+
+                            Button {
+                                text: "Any screen"
+                                tooltipText: "Omarchy's global workspaces"
+                                selected: root.formMonitor === ""
+                                verticalPadding: Style.space(4)
+                                onClicked: root.formMonitor = ""
+                            }
+                            Repeater {
+                                model: root.liveMonitors
+                                delegate: Button {
+                                    required property var modelData
+                                    text: modelData.name
+                                    tooltipText: modelData.description
+                                        ? modelData.description + " — this screen's own workspaces"
+                                        : "This screen's own workspaces"
+                                    selected: root.formMonitor === modelData.key
+                                    verticalPadding: Style.space(4)
+                                    onClicked: root.formMonitor = modelData.key
+                                }
+                            }
+                        }
+
+                        PanelSectionHeader {
+                            text: root.formSpecial !== "" ? "PICK A WORKSPACE (NOT USED)" : "PICK A WORKSPACE"
                             foreground: root.foreground
                             fontFamily: root.fontFamily
                         }
@@ -549,6 +659,10 @@ Panel {
                             columns: 5
                             columnSpacing: Style.space(4)
                             rowSpacing: Style.space(4)
+                            // A special workspace is not a numbered slot, so the
+                            // number below has nothing to say about it.
+                            enabled: root.formSpecial === ""
+                            opacity: enabled ? 1.0 : 0.4
                             Repeater {
                                 model: 10
                                 delegate: Button {
@@ -562,6 +676,82 @@ Panel {
                                     Layout.preferredHeight: Style.space(38)
                                 }
                             }
+                        }
+
+                        PanelSeparator {
+                            Layout.fillWidth: true
+                            foreground: root.foreground
+                        }
+
+                        PanelSectionHeader {
+                            text: "OR A SCRATCHPAD"
+                            foreground: root.foreground
+                            fontFamily: root.fontFamily
+                        }
+
+                        // Hyprland special workspaces -- what SUPER+S toggles.
+                        //
+                        // The buttons are the specials Hyprland has right now,
+                        // which is a convenience, not the set of allowed values:
+                        // a special workspace exists only while it holds a
+                        // window, so one you have not opened yet will not be
+                        // listed. Type its name instead and it is created on
+                        // first launch.
+                        Flow {
+                            Layout.fillWidth: true
+                            spacing: Style.space(4)
+
+                            Button {
+                                text: "None"
+                                tooltipText: "Use the numbered workspace above"
+                                selected: root.formSpecial === ""
+                                verticalPadding: Style.space(4)
+                                onClicked: { root.formSpecial = ""; specialField.text = "" }
+                            }
+                            Repeater {
+                                model: root.liveSpecials
+                                delegate: Button {
+                                    required property var modelData
+                                    text: String(modelData)
+                                    tooltipText: "special:" + String(modelData)
+                                    selected: root.formSpecial === String(modelData)
+                                    verticalPadding: Style.space(4)
+                                    onClicked: {
+                                        root.formSpecial = String(modelData)
+                                        specialField.text = String(modelData)
+                                    }
+                                }
+                            }
+                        }
+
+                        TextField {
+                            id: specialField
+                            Layout.fillWidth: true
+                            verticalPadding: Style.space(9)
+                            placeholderText: "or type a scratchpad name (e.g. email)..."
+                            foreground: root.foreground
+                            accent: Color.accent
+                            font.family: root.fontFamily
+                            // Deliberately not bound to formSpecial: the buttons
+                            // above write this field, and binding both ways would
+                            // fight itself.
+                            onTextChanged: root.formSpecial = text.trim()
+                            Keys.onPressed: function(event) {
+                                if (event.key === Qt.Key_Escape) {
+                                    root.close()
+                                    event.accepted = true
+                                }
+                            }
+                        }
+
+                        Text {
+                            textFormat: Text.PlainText
+                            Layout.fillWidth: true
+                            wrapMode: Text.WordWrap
+                            text: "Launching to " + root.formTargetLabel
+                            color: root.dim
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.caption - 1
                         }
 
                         PanelSeparator {
@@ -687,7 +877,11 @@ Panel {
                             }
                             Button {
                                 text: root.hyprLayout === "scrolling" ? "⇄ dwindle" : "⇄ scrolling"
-                                tooltipText: "Toggle WS" + root.formWorkspace + " between dwindle and scrolling (saved, same as Super+L)"
+                                tooltipText: root.formSpecial !== "" || root.formMonitor !== ""
+                                    ? "Layouts are saved per global workspace, so this does not apply to " + root.formTargetLabel
+                                    : "Toggle WS" + root.formWorkspace + " between dwindle and scrolling (saved, same as Super+L)"
+                                enabled: root.formSpecial === "" && root.formMonitor === ""
+                                opacity: enabled ? 1.0 : 0.4
                                 verticalPadding: Style.space(4)
                                 onClicked: root.toggleHyprLayout()
                             }
@@ -716,17 +910,17 @@ Panel {
                             barPos: panel.barPos
                             barSizeH: panel.barH
                             barSizeW: panel.barW
-                            onMoveApp: function(fromIdx, toIdx) { root.reorderAssignment(root.formWorkspace, fromIdx, toIdx) }
+                            onMoveApp: function(fromIdx, toIdx) { root.reorderAssignment(root.formTargetKey, fromIdx, toIdx) }
                         }
                         Text {
                             textFormat: Text.PlainText
                             Layout.fillWidth: true
                             wrapMode: Text.WordWrap
                             text: (root.hyprLayout === "scrolling"
-                                  ? "WS" + root.formWorkspace + " scrolling: windows sit side-by-side (" + Math.round(root.hyprColumnWidth*100) + "% cols) — scroll horizontally to see all " + root.addedApps.length + "."
+                                  ? root.formTargetLabel + " scrolling: windows sit side-by-side (" + Math.round(root.hyprColumnWidth*100) + "% cols) — scroll horizontally to see all " + root.addedApps.length + "."
                                   : root.hyprLayout === "master"
-                                  ? "WS" + root.formWorkspace + " master: left master + right stack."
-                                  : "WS" + root.formWorkspace + " dwindle: binary split tiling.")
+                                  ? root.formTargetLabel + " master: left master + right stack."
+                                  : root.formTargetLabel + " dwindle: binary split tiling.")
                                   + " Tip: drag a tile onto another to reorder · ⇄ button switches this workspace only."
                             color: root.dim
                             font.family: root.fontFamily

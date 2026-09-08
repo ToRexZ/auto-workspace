@@ -283,6 +283,63 @@ target_name() {
   printf '%s\n' "${1#name:}"
 }
 
+# What the panel's target pickers are built from: the screens an assignment can
+# be pinned to, and the special workspaces that currently exist.
+#
+# Monitor keys come from monitor_keys so the panel and the launcher cannot show
+# and resolve different strings. The connector name rides along purely for
+# display -- "eDP-1" is what a person recognises, the key is what gets stored.
+#
+# Specials are whatever Hyprland has right now, listed without their "special:"
+# prefix. A scratchpad only exists while it holds a window, so this is a
+# convenience for picking a familiar one, not the set of allowed values -- the
+# panel also lets a name be typed.
+cmd_targets() {
+  local src="${1:-}"
+  local monitors_json
+  if [[ "$src" == "-" ]]; then
+    monitors_json=$(cat)
+  else
+    monitors_json=$("$_HYPRCTL" monitors -j 2>/dev/null)
+  fi
+  [[ -z "$monitors_json" ]] && monitors_json="[]"
+
+  local monitors
+  monitors=$(printf '%s' "$monitors_json" | "$_JQ" -c '
+    . as $all
+    | [ .[]
+        | . as $m
+        | (($m.description // "")) as $d
+        | {
+            key: (
+              if $d == "" then ($m.name // "")
+              else
+                if ([$all[] | select((.name // "") != ($m.name // "") and (.description // "") == $d)] | length) > 0
+                then $d + "@" + ($m.name // "")
+                else $d
+                end
+              end
+            ),
+            name: ($m.name // ""),
+            description: $d
+          }
+      ]
+  ' 2>/dev/null)
+  [[ -z "$monitors" ]] && monitors="[]"
+
+  local specials="[]"
+  if [[ "$src" != "-" ]]; then
+    specials=$("$_HYPRCTL" workspaces -j 2>/dev/null | "$_JQ" -c '
+      [ .[] | (.name // "") | select(startswith("special:")) | ltrimstr("special:") | select(length > 0) ]
+      | unique
+    ' 2>/dev/null)
+    [[ -z "$specials" ]] && specials="[]"
+  fi
+
+  "$_JQ" -nc --argjson monitors "$monitors" --argjson specials "$specials" \
+    '{monitors: $monitors, specials: $specials}'
+}
+
 cmd_launch() {
   local workspace="$1"
   local exec_cmd="$2"
@@ -711,6 +768,7 @@ case "${1:-}" in
   --default-config) default_config ;;
   --hypr-facts) cmd_hypr_facts ;;
   --monitor-keys) shift; monitor_keys "${1:-}" ;;
+  --targets) shift; cmd_targets "${1:-}" ;;
   --set-workspace-layout) shift; cmd_set_workspace_layout "$@" ;;
   --help|-h|"") cat <<'HELP'
 auto-workspace.sh — helper for tenzin.auto-workspace
@@ -725,6 +783,8 @@ auto-workspace.sh — helper for tenzin.auto-workspace
   --hypr-facts            print layout/gaps/monitor facts plus per-workspace layouts
   --monitor-keys [-]      print each connected screen's workspace-name key
                           (reads `hyprctl monitors -j` on stdin when given "-")
+  --targets [-]           print {monitors:[{key,name,description}], specials:[]}
+                          for the panel's target pickers
   --set-workspace-layout <ws> <dwindle|scrolling|master>
                           set one workspace's layout (same persist path as Super+L)
 HELP

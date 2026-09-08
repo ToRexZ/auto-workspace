@@ -152,6 +152,32 @@ function resolveTarget(a, liveMonitorKeys) {
     return { selector: String(a.workspace), name: String(a.workspace) }
 }
 
+// How a target reads in the panel.
+//
+// A monitor is stored by its description key, which is long and unfamiliar
+// ("EDO EF10QBC64.C"), so display prefers the connector the person recognises
+// ("eDP-1"). `monitors` is the list from `auto-workspace.sh --targets`; a key
+// missing from it means that screen is not connected, and the stored key is
+// shown as-is rather than hidden.
+function targetLabel(a, monitors) {
+    if (!a) return ""
+    if (a.special) return a.special
+
+    if (a.monitor) {
+        var shown = a.monitor
+        var list = monitors || []
+        for (var i = 0; i < list.length; i++) {
+            if (list[i] && list[i].key === a.monitor) {
+                shown = list[i].name || a.monitor
+                break
+            }
+        }
+        return shown + " \u00b7 WS" + a.workspace
+    }
+
+    return "WS" + a.workspace
+}
+
 // Is this a workspace selector we are willing to hand to Hyprland?
 //
 // The selector is interpolated into hl.exec_cmd("[workspace <sel> silent] ...")

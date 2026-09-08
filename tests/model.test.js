@@ -216,3 +216,33 @@ test("isValidSelector rejects an unknown selector kind", () => {
   assert.equal(Model.isValidSelector("previous"), false)
   assert.equal(Model.isValidSelector("e+1"), false)
 })
+
+// ---------------------------------------------------------------------------
+// targetLabel: how a target reads in the panel. Monitors are stored by
+// description key -- long and unfamiliar -- so display prefers the connector.
+// ---------------------------------------------------------------------------
+
+const MONITOR_LIST = [
+  { key: "EDO EF10QBC64.C", name: "eDP-1", description: "EDO EF10QBC64.C" },
+  { key: "Dell Inc. DELL S3425DW BPTRR44", name: "DP-1", description: "Dell Inc. DELL S3425DW BPTRR44" }
+]
+
+test("targetLabel names a special workspace", () => {
+  const a = Model.normalizeAssignment(assignment({ special: "scratchpad" }))
+  assert.equal(Model.targetLabel(a, MONITOR_LIST), "scratchpad")
+})
+
+test("targetLabel shows a global workspace by number", () => {
+  const a = Model.normalizeAssignment(assignment({ workspace: 4 }))
+  assert.equal(Model.targetLabel(a, MONITOR_LIST), "WS4")
+})
+
+test("targetLabel prefers the connector name for a known monitor", () => {
+  const a = Model.normalizeAssignment(assignment({ workspace: 3, monitor: "EDO EF10QBC64.C" }))
+  assert.equal(Model.targetLabel(a, MONITOR_LIST), "eDP-1 · WS3")
+})
+
+test("targetLabel falls back to the stored key for a monitor that is not connected", () => {
+  const a = Model.normalizeAssignment(assignment({ workspace: 2, monitor: "Some Absent Screen" }))
+  assert.equal(Model.targetLabel(a, MONITOR_LIST), "Some Absent Screen · WS2")
+})
